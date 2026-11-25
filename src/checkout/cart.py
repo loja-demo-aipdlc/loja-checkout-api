@@ -24,5 +24,5 @@ class Cart:
     def subtotal_cents(self):
         return sum(i.unit_cents * i.quantity for i in self.items)
 
-    def total_cents(self, coupons=()):
-        return apply_discounts(self.subtotal_cents(), coupons)
+    def total_cents(self, coupons=(), first_purchase=False, flags=None):
+        return apply_discounts(self.subtotal_cents(), coupons, first_purchase, flags)
