@@ -24,3 +24,8 @@ commit: o commit de origem lido da proveniência entrou por PR com o check `aipd
 docker run --rm -p 8080:8080 ghcr.io/loja-demo-aipdlc/loja-checkout-api@sha256:...
 curl localhost:8080/health
 ```
+
+## Lambda
+
+A imagem traz o Lambda Web Adapter em `/opt/extensions`: no Lambda, ele repassa as requisições para o uvicorn na
+porta 8080; fora dele, não faz nada. A mesma imagem, com o mesmo digest verificado, roda em docker e no Lambda.

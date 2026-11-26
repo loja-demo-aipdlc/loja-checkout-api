@@ -30,6 +30,10 @@ class Api(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body['flags'], {'cupom-primeira-compra': False})
 
+    def test_imagem_traz_o_lambda_web_adapter(self):
+        # Roda dentro da imagem: a mesma imagem (mesmo digest) precisa servir no Lambda
+        self.assertTrue(os.access('/opt/extensions/lambda-adapter', os.X_OK))
+
     def test_total_sem_cupom(self):
         status, body = call('/carrinho/total', {'customer_id': 'c-1', 'items': [
             {'sku': 'sku-1', 'unit_cents': 1990, 'quantity': 2}, {'sku': 'sku-2', 'unit_cents': 500}]})
