@@ -3,7 +3,9 @@
 #              confiável (atestação conferida de novo) e verificação; devolve as flags do plano
 #   deploy  -> environment production (só o branch principal; a role da AWS só aceita este environment):
 #              copia a imagem pelo digest, atualiza a função, confere o digest resolvido, aplica as flags do plano,
-#              publica a versão, aponta o alias production, testa e registra o check aipdlc-deploy
+#              publica a versão, aponta o alias production e testa
+# O registro do deploy (check aipdlc-deploy) não sai daqui: a identidade de verificação (GitHub App aipdlc-verify)
+# lê na AWS o que o alias production roda, no fim deste workflow, e confere contra o G4 (ROADMAP F0, passo 4).
 # Antes de usar fora da demo, fixe cada action pelo SHA completo do commit.
 name: deploy
 
@@ -92,10 +94,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      checks: write
     env:
       FLAGS: ${{ needs.liberar.outputs.flags }}
-      SOURCE_COMMIT: ${{ needs.liberar.outputs.source_commit }}
       FUNCTION_URL: ${{ vars.FUNCTION_URL }}
     steps:
       - uses: aws-actions/configure-aws-credentials@v4
@@ -165,25 +165,3 @@ jobs:
           fi
           echo "### Em produção: versão $VERSAO, \`$DIGEST\`, flags: ${FLAGS:-nenhuma}" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Motor dos checks (somente leitura)
-        uses: actions/checkout@v4
-        with:
-          repository: gabrielmissio/ai-pdlc
-          ref: main
-          token: ${{ secrets.AIPDLC_ENGINE_TOKEN }}
-          path: engine
-          persist-credentials: false
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Registrar o deploy (check aipdlc-deploy)
-        working-directory: engine/examples/loja-demo/repos/aipdlc-checks
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          VERSAO: ${{ steps.versao.outputs.versao }}
-        run: |
-          pip install -q -r ../../../../requirements.txt
-          python -m aipdlc implantado --repo "${GITHUB_REPOSITORY#*/}" --uow "$UOW" --digest "$DIGEST" \
-            --commit "$SOURCE_COMMIT" --versao "$VERSAO" --funcao "$FUNCTION" --flags "$FLAGS"

@@ -1,8 +1,8 @@
-# Construção e verificação da checkout-api (etapa 4; spec 12, CORE-14, CORE-35, CORE-36).
-#   build       -> builder confiável da organização (aipdlc-checks): imagem no GHCR + proveniência assinada
-#   testes      -> os testes do autor sobre a imagem publicada, pelo digest, sem escrita no registro
-#   verificacao -> o motor lê o commit de origem da proveniência e confere que ele entrou por PR com o check
-#                  aipdlc aprovado; publica o check aipdlc-artefato no commit
+# Construção da checkout-api (etapa 4; spec 12, CORE-14, CORE-35, CORE-36).
+#   build  -> builder confiável da organização (aipdlc-checks): imagem no GHCR + proveniência assinada
+#   testes -> os testes do autor sobre a imagem publicada, pelo digest, sem escrita no registro
+# A verificação do artefato (check aipdlc-artefato) não roda aqui: a identidade de verificação (GitHub App
+# aipdlc-verify) a faz no fim deste workflow, conferindo a atestação (ROADMAP F0, passo 4).
 # Antes de usar fora da demo, fixe cada action pelo SHA completo do commit.
 name: build
 
@@ -54,48 +54,3 @@ jobs:
           docker run --rm --network host -v "$PWD/tests:/app/tests:ro" -e CHECKOUT_URL=http://localhost:8080 \
             --entrypoint python "$IMAGE" -m unittest discover -s tests -t . -v
 
-  verificacao:
-    needs: [build, testes]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: read
-      attestations: read
-      pull-requests: read
-      issues: read
-      checks: write
-    steps:
-      - name: Motor dos checks (somente leitura)
-        uses: actions/checkout@v4
-        with:
-          repository: gabrielmissio/ai-pdlc
-          ref: main
-          token: ${{ secrets.AIPDLC_ENGINE_TOKEN }}
-          path: engine
-          persist-credentials: false
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Dependências fixadas
-        run: pip install -q -r engine/requirements.txt
-
-      - name: Verificar proveniência e trilha do artefato
-        working-directory: engine/examples/loja-demo/repos/aipdlc-checks
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_TOKEN: ${{ github.token }}
-          REPO: ${{ github.event.repository.name }}
-          DIGEST: ${{ needs.build.outputs.digest }}
-        run: |
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          python -m aipdlc artefato --repo "$REPO" --digest "$DIGEST" --saida "$RUNNER_TEMP/artefato"
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: verificacao-artefato
-          path: ${{ runner.temp }}/artefato
-          retention-days: 90
