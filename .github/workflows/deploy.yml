@@ -1,0 +1,189 @@
+# Deploy da checkout-api no Lambda (etapa 5; spec 12, CORE-20, CORE-35, CORE-36).
+#   liberar -> o motor só libera o digest que está num plano G4 aprovado e mergeado, com proveniência de builder
+#              confiável (atestação conferida de novo) e verificação; devolve as flags do plano
+#   deploy  -> environment production (só o branch principal; a role da AWS só aceita este environment):
+#              copia a imagem pelo digest, atualiza a função, confere o digest resolvido, aplica as flags do plano,
+#              publica a versão, aponta o alias production, testa e registra o check aipdlc-deploy
+# Antes de usar fora da demo, fixe cada action pelo SHA completo do commit.
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      uow:
+        description: UoW do plano G4 aprovado (uow-loja-AAAA-NNNN)
+        required: true
+      digest:
+        description: Digest do plano (sha256:...)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  FUNCTION: loja-checkout-api
+  UOW: ${{ inputs.uow }}
+  DIGEST: ${{ inputs.digest }}
+
+jobs:
+  liberar:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: read
+      attestations: read
+      packages: read
+    outputs:
+      flags: ${{ steps.liberar.outputs.flags }}
+      source_commit: ${{ steps.liberar.outputs.source_commit }}
+    steps:
+      - name: Entradas no formato esperado
+        run: |
+          [[ "$UOW" =~ ^uow-[a-z0-9]+-[0-9]{4}-[0-9]{4}$ ]] || { echo "::error::uow inválida"; exit 1; }
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::digest inválido"; exit 1; }
+
+      - name: Motor dos checks (somente leitura)
+        uses: actions/checkout@v4
+        with:
+          repository: gabrielmissio/ai-pdlc
+          ref: main
+          token: ${{ secrets.AIPDLC_ENGINE_TOKEN }}
+          path: engine
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dependências fixadas
+        run: pip install -q -r engine/requirements.txt
+
+      - name: Liberação (plano G4, proveniência e verificação)
+        id: liberar
+        working-directory: engine/examples/loja-demo/repos/aipdlc-checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m aipdlc liberar --repo "${GITHUB_REPOSITORY#*/}" --uow "$UOW" --digest "$DIGEST" --saida "$RUNNER_TEMP/liberacao"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: liberacao
+          path: ${{ runner.temp }}/liberacao
+          retention-days: 90
+
+  deploy:
+    needs: liberar
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: ${{ vars.FUNCTION_URL }}
+    permissions:
+      contents: read
+      id-token: write
+      checks: write
+    env:
+      FLAGS: ${{ needs.liberar.outputs.flags }}
+      SOURCE_COMMIT: ${{ needs.liberar.outputs.source_commit }}
+      FUNCTION_URL: ${{ vars.FUNCTION_URL }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Imagem no ECR pelo digest (mesmo digest do GHCR)
+        id: ecr
+        run: |
+          registry="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.$AWS_REGION.amazonaws.com"
+          repo="$registry/$FUNCTION"
+          if ! aws ecr describe-images --repository-name "$FUNCTION" --image-ids imageDigest="$DIGEST" >/dev/null 2>&1; then
+            docker run --rm quay.io/skopeo/stable:v1.16.1 copy --preserve-digests \
+              --dest-creds "AWS:$(aws ecr get-login-password)" \
+              "docker://ghcr.io/${GITHUB_REPOSITORY,,}@$DIGEST" "docker://$repo:$UOW-${DIGEST:7:12}"
+          fi
+          got=$(aws ecr describe-images --repository-name "$FUNCTION" --image-ids imageDigest="$DIGEST" \
+                --query 'imageDetails[0].imageDigest' --output text)
+          [ "$got" = "$DIGEST" ] || { echo "::error::o ECR tem $got, o plano diz $DIGEST"; exit 1; }
+          echo "image=$repo@$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Código da função pelo digest
+        run: |
+          aws lambda update-function-code --function-name "$FUNCTION" --image-uri "${{ steps.ecr.outputs.image }}" >/dev/null
+          aws lambda wait function-updated-v2 --function-name "$FUNCTION"
+
+      - name: Flags do plano (CORE-20)
+        run: |
+          aws lambda update-function-configuration --function-name "$FUNCTION" \
+            --environment "$(jq -cn --arg f "$FLAGS" '{Variables:{CHECKOUT_FLAGS:$f}}')" >/dev/null
+          aws lambda wait function-updated-v2 --function-name "$FUNCTION"
+
+      - name: Versão nova, com o digest conferido
+        id: versao
+        run: |
+          v=$(aws lambda publish-version --function-name "$FUNCTION" \
+              --description "$UOW ${DIGEST:0:19}" --query Version --output text)
+          got=$(aws lambda get-function --function-name "$FUNCTION" --qualifier "$v" \
+                --query Code.ResolvedImageUri --output text)
+          [ "${got##*@}" = "$DIGEST" ] || { echo "::error::a versão $v roda ${got##*@}, o plano diz $DIGEST"; exit 1; }
+          echo "versao=$v" >> "$GITHUB_OUTPUT"
+          echo "anterior=$(aws lambda get-alias --function-name "$FUNCTION" --name production \
+                --query FunctionVersion --output text)" >> "$GITHUB_OUTPUT"
+
+      - name: Alias production na versão nova, com teste e volta automática
+        env:
+          VERSAO: ${{ steps.versao.outputs.versao }}
+          ANTERIOR: ${{ steps.versao.outputs.anterior }}
+        run: |
+          aws lambda update-alias --function-name "$FUNCTION" --name production --function-version "$VERSAO" >/dev/null
+          ok=false
+          for i in $(seq 1 10); do
+            if curl -sf "${FUNCTION_URL%/}/health" -o health.json && python3 - <<'PY'
+          import json, os, sys
+          on = {f for f in os.environ['FLAGS'].split(',') if f}
+          flags = json.load(open('health.json'))['flags']
+          sys.exit(0 if {k for k, v in flags.items() if v} == on else 1)
+          PY
+            then ok=true; break; fi
+            sleep 3
+          done
+          cat health.json 2>/dev/null; echo
+          if [ "$ok" != true ]; then
+            aws lambda update-alias --function-name "$FUNCTION" --name production --function-version "$ANTERIOR" >/dev/null
+            echo "::error::teste falhou: alias production voltou para a versão $ANTERIOR"; exit 1
+          fi
+          echo "### Em produção: versão $VERSAO, \`$DIGEST\`, flags: ${FLAGS:-nenhuma}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Motor dos checks (somente leitura)
+        uses: actions/checkout@v4
+        with:
+          repository: gabrielmissio/ai-pdlc
+          ref: main
+          token: ${{ secrets.AIPDLC_ENGINE_TOKEN }}
+          path: engine
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Registrar o deploy (check aipdlc-deploy)
+        working-directory: engine/examples/loja-demo/repos/aipdlc-checks
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSAO: ${{ steps.versao.outputs.versao }}
+        run: |
+          pip install -q -r ../../../../requirements.txt
+          python -m aipdlc implantado --repo "${GITHUB_REPOSITORY#*/}" --uow "$UOW" --digest "$DIGEST" \
+            --commit "$SOURCE_COMMIT" --versao "$VERSAO" --funcao "$FUNCTION" --flags "$FLAGS"
