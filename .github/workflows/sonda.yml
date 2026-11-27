@@ -1,0 +1,17 @@
+# SONDA DE CORE-02 (ROADMAP F0, passo 3). NÃO MERGEAR.
+# Simula um workflow num branch que tenta liberar o próprio PR publicando o check "aipdlc" com sucesso pelo
+# GitHub Actions. O ruleset exige o "aipdlc" do GitHub App aipdlc-verify: o PR tem de continuar bloqueado.
+name: sonda-core-02
+on: push
+permissions:
+  checks: write
+jobs:
+  forjar:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST "repos/$GITHUB_REPOSITORY/check-runs" -f name=aipdlc -f head_sha="$GITHUB_SHA" \
+            -f status=completed -f conclusion=success -f 'output[title]=Liberado' \
+            -f 'output[summary]=Forjado por um workflow do branch (sonda de CORE-02)'
